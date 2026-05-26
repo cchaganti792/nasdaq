@@ -50,6 +50,14 @@ if (TRADEDATE is null)
    v_TRADEDATE1:=TRADEDATE;
 end if;
 dbms_output.put_line('Tradedate1 is '|| v_TRADEDATE1);
+
+-- Guard: need at least 3 distinct dates in VOL_VIEW (backfill early days will have fewer)
+select count(distinct tradedate) into v_count from VOL_VIEW;
+if v_count < 3 then
+    dbms_output.put_line('nasdaq_VOL_proc: only ' || v_count || ' date(s) in VOL_VIEW, need 3. Skipping.');
+    return;
+end if;
+
 select tradedate into v_interim_tradedate1 from (select tradedate,ROW_NUMBER()OVER(order by  tradedate desc) RowNo  from (select distinct tradedate from VOL_VIEW order by tradedate)) where rowno=1;
 select tradedate into v_interim_tradedate2 from (select tradedate,ROW_NUMBER()OVER(order by  tradedate desc) RowNo  from (select distinct tradedate from VOL_VIEW order by tradedate)) where rowno=2;
 select tradedate into v_interim_tradedate3 from (select tradedate,ROW_NUMBER()OVER(order by  tradedate desc) RowNo  from (select distinct tradedate from VOL_VIEW order by tradedate)) where rowno=3;

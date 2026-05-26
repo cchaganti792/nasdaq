@@ -10,7 +10,12 @@ Use cases:
   2. Ongoing daily use  : called by Nasdaq_load.py instead of the old script
 
 Requirements:
-  pip install yfinance cx_Oracle
+  pip install yfinance oracledb
+
+Oracle connection:
+  Uses oracledb in THICK mode — required for Oracle 11g database.
+  Thick mode reuses the existing Oracle Client at ORACLE_CLIENT_DIR.
+  init_oracle_client() must be called before any connection is made.
 
 How split data flows into Oracle:
   This script  -->  SPLIT_STOCK_DOWNLOAD_CONTENT (STATE_FLAG='N' explicitly set — no DB default)
@@ -18,21 +23,30 @@ How split data flows into Oracle:
                     then sets STATE_FLAG='Y'
 """
 
-import os
+import sys
 import time
-import cx_Oracle
+import oracledb
 import yfinance as yf
 from fractions import Fraction
-from datetime import date
+from datetime import date, timedelta
+
+# ── Oracle thick mode — required for Oracle 11g ────────────────────────────
+# Thin mode does not support Oracle 11g (DPY-3010).
+# Requires 64-bit Oracle Instant Client Basic — download free from Oracle website,
+# search: "Oracle Instant Client Downloads Windows x64", unzip to a folder below.
+ORACLE_CLIENT_DIR = r"C:\ora_insta_client\instantclient_23_0"
+oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)
 
 # ── Oracle connection ──────────────────────────────────────────────────────
-os.environ['ORACLE_HOME'] = "C:\\app\\User\\product\\11.2.0\\client_1"
-connection = cx_Oracle.connect("nasdaq", "nasdaq123", "localhost/orcl")
+connection = oracledb.connect(user="nasdaq", password="nasdaq123", dsn="localhost/orcl")
 cursor = connection.cursor()
 
 # ── Date range for this run ────────────────────────────────────────────────
-# Change BACKFILL_START to move the window forward after first run
-BACKFILL_START = date(2022, 11, 11)
+# Two modes:
+#   python SPLIT_INFO_DOWNLOAD_YFINANCE.py backfill  -> loads from 11-Nov-2022 (run once)
+#   python SPLIT_INFO_DOWNLOAD_YFINANCE.py           -> checks last 7 days only (daily use)
+BACKFILL_MODE  = len(sys.argv) > 1 and sys.argv[1].lower() == 'backfill'
+BACKFILL_START = date(2022, 11, 11) if BACKFILL_MODE else date.today() - timedelta(days=7)
 RUN_END        = date.today()
 
 
@@ -68,7 +82,7 @@ def insert_split(symbol, ratio_str, ex_date):
         )
         connection.commit()
         print(f"  INSERTED   {symbol:<8}  {ratio_str:<6}  ex_date={ex_date}")
-    except cx_Oracle.IntegrityError:
+    except oracledb.IntegrityError:
         print(f"  SKIP       {symbol:<8}  already present for {ex_date}")
 
 
@@ -76,8 +90,8 @@ def insert_split(symbol, ratio_str, ex_date):
 symbol_list = []
 cursor.execute(
     "SELECT DISTINCT symbol FROM nasdaq_hist "
-    "WHERE tradedate >= :start ORDER BY symbol",
-    start=BACKFILL_START
+    "WHERE tradedate >= :v_from_date ORDER BY symbol",
+    v_from_date=BACKFILL_START
 )
 for row in cursor:
     symbol_list.append(row[0])
@@ -98,7 +112,7 @@ for idx, symbol in enumerate(symbol_list, 1):
         ticker = yf.Ticker(symbol)
         splits = ticker.splits          # pandas Series  index=Timestamp, value=float ratio
 
-        if splits.empty:
+        if splits is None or splits.empty:
             print(f"[{idx:>5}/{total}] {symbol:<8}  no split history")
             continue
 
@@ -130,7 +144,7 @@ for idx, symbol in enumerate(symbol_list, 1):
 cursor.execute(
     "UPDATE SPLIT_STOCK_DOWNLOAD_STATUS "
     "SET DSTATE = 'Y' "
-    "WHERE DSTATE = 'N' AND DOWNLOAD_MON <= SYSDATE"
+    "WHERE DSTATE = 'N'"
 )
 rows_updated = cursor.rowcount
 connection.commit()

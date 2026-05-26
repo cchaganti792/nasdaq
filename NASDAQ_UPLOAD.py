@@ -13,7 +13,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 import cx_Oracle
 import os
-#os.environ['ORACLE_HOME'] ="D:\\app\User\product\\11.2.0\client_1"
+#os.environ['ORACLE_HOME'] ="D:\app\User\product\11.2.0\dbhome_1\BIN"
 import cx_Oracle
 import os
 connection = cx_Oracle.connect("nasdaq", "nasdaq123", "localhost/orcl")
@@ -44,8 +44,8 @@ def csv_read(file):
                 cursor.execute('insert into PE select * from P_E')
                 cursor.execute('insert into funda select * from fundav')
                 cursor.execute('insert into QUICK_LOOK_LOG select * from QUICK_LOOK')
-                cursor.execute('insert into rsi2530_log select * from rsi2030')
                 cursor.execute('insert into nasdaq.Down150_vw select * from  DOWN_150_SELECT_VW')
+                cursor.execute('insert into rsi2530_log select * from rsi2030')
                 connection.commit()
                 print '******************* Executing 150 down Proc sleep **********'
                 #time.sleep(150)
