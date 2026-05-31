@@ -1,75 +1,165 @@
-import sys
+"""
+NASDAQ_UPLOAD.py  -  Python 3
+Daily price data loader — called by Nasdaq_load.py.
+
+Reads each NASDAQ*.csv from Downloads\NASDAQ\, inserts into NASDAQ_HIST,
+then runs the full proc chain. If any proc fails, prints cleanup SQL for
+that trade date and exits so no partial data is left silently in the DB.
+"""
+
 import os
-import selenium
-import re
-from selenium import webdriver
-import pandas
+import sys
 import csv
-import xlsx2csv
-import time
 import glob
 import shutil
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-import cx_Oracle
-import os
-#os.environ['ORACLE_HOME'] ="D:\app\User\product\11.2.0\dbhome_1\BIN"
-import cx_Oracle
-import os
-connection = cx_Oracle.connect("nasdaq", "nasdaq123", "localhost/orcl")
-cursor = connection.cursor()
-def insert_db(values):
+import time
+import oracledb
+
+# ── Oracle thick mode — required for Oracle 11g ────────────────────────────
+ORACLE_CLIENT_DIR = r"C:\ora_insta_client\instantclient_23_0"
+oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)
+
+connection = oracledb.connect(user="nasdaq", password="nasdaq123", dsn="localhost/orcl")
+cursor     = connection.cursor()
+
+SEP = '=' * 61
+
+
+def cleanup_sql_for_date(tradedate):
+    d = tradedate
+    return [
+        f"-- Core price tables",
+        f"DELETE FROM NASDAQ_HIST      WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM NASDAQ_AVG       WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM VOL_TOPPERS_HIST WHERE TRADEDATE   = DATE '{d}';",
+        f"-- Price / volume signal logs (nasdaq_avg_proc_daily)",
+        f"DELETE FROM PRI_LOG          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM PRI2_LOG         WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM VOL_LOG          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM VOL2_LOG         WHERE INSERT_DATE = DATE '{d}';",
+        f"-- Screener output tables (nasdaq_postive_proc / nasdaq_VOL_proc)",
+        f"DELETE FROM STRONG_POSITIVE  WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM ALL_POSITIVE     WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM STRONG_NEGITIVE  WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM ALL_NEGITIVE     WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM BULLISH          WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM POS_VOL          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM NEG_VOL          WHERE INSERT_DATE = DATE '{d}';",
+        f"-- Snapshot log tables (view inserts)",
+        f"DELETE FROM PE               WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM FUNDA            WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM QUICK_LOOK_LOG   WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM RSI2530_LOG      WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM DOWN150_VW       WHERE TRADEDATE   = DATE '{d}';",
+        f"-- Analysis proc tables (observer_proc / Buy_proc)",
+        f"DELETE FROM OBSERVER_LOG     WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM PRICE_POINTS_LOG WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM BUY_LOG_LOG      WHERE TRADEDATE   = DATE '{d}';",
+        "COMMIT;",
+    ]
+
+
+def stop(message, tradedate=None):
+    print(f"\n  {SEP}")
+    print(f"  STOPPED : {message}")
+    if tradedate:
+        print(f"\n  Run this SQL to clean up, then re-run:")
+        for line in cleanup_sql_for_date(tradedate):
+            print(f"    {line}")
+    print(f"  {SEP}\n")
+    sys.exit(1)
+
+
+def run_proc(name, tradedate, params=None):
+    print(f"    {name:<28} running...")
+    try:
+        cursor.callproc(name, params or [])
+        connection.commit()
+    except Exception as exc:
+        connection.rollback()
+        stop(f"Proc {name} failed: {exc}", tradedate)
+
+
+def insert_db(values, tradedate):
+    try:
+        cursor.execute(
+            "INSERT INTO NASDAQ_HIST (SYMBOL,TRADEDATE,OPEN,HIGH,LOW,CLOSE,VOLUME) "
+            "VALUES (:sym, TO_DATE(:dt,'dd-mon-yy'), TO_NUMBER(:op), "
+            "        TO_NUMBER(:hi), TO_NUMBER(:lo), TO_NUMBER(:cl), TO_NUMBER(:vol))",
+            sym=values[0], dt=values[1], op=values[2],
+            hi=values[3],  lo=values[4], cl=values[5], vol=values[6]
+        )
+    except oracledb.IntegrityError:
+        print(f"    {values[0]} {values[1]} already present — skipped")
+
+
+def csv_read(filepath):
+    print(f"\n  Loading : {os.path.basename(filepath)}")
+
+    # ── Insert OHLCV rows ──────────────────────────────────────────────────
+    inserted = 0
+    skipped  = 0
+    tradedate = None
+
+    with open(filepath, encoding='utf-8') as f:
+        for row in csv.reader(f):
+            if len(row) < 7:
+                continue
+            insert_db(row, None)
+            inserted += 1
+    connection.commit()
+
+    # ── Determine tradedate from what was just loaded ──────────────────────
+    cursor.execute("SELECT MAX(TRADEDATE) FROM NASDAQ_HIST")
+    result = cursor.fetchone()
+    if not result or not result[0]:
+        stop(f"Could not determine tradedate after loading {os.path.basename(filepath)}")
+    tradedate = result[0].strftime('%Y-%m-%d')
+    print(f"    NASDAQ_HIST : {inserted} rows loaded  |  tradedate : {tradedate}")
+
+    # ── Proc chain ────────────────────────────────────────────────────────
+    run_proc('SPLIT_PROC',            tradedate)
+    run_proc('nasdaq_avg_proc_daily', tradedate)
+    run_proc('RSI_proc',              tradedate)
+    run_proc('BOLLINGER_proc',        tradedate)
+    run_proc('nasdaq_postive_proc',   tradedate)
+    run_proc('nasdaq_VOL_proc',       tradedate)
+
+    # ── View snapshot inserts ─────────────────────────────────────────────
+    view_inserts = [
+        'INSERT INTO PE               SELECT * FROM P_E',
+        'INSERT INTO funda            SELECT * FROM fundav',
+        'INSERT INTO QUICK_LOOK_LOG   SELECT * FROM QUICK_LOOK',
+        'INSERT INTO nasdaq.Down150_vw SELECT * FROM DOWN_150_SELECT_VW',
+        'INSERT INTO rsi2530_log      SELECT * FROM rsi2030',
+    ]
+    for stmt in view_inserts:
         try:
-                insert_stmt="insert into NASDAQ_HIST (SYMBOL,TRADEDATE,OPEN,HIGH,LOW,CLOSE,VOLUME) values (:vSYMBOL,to_date(:vTRADEDATE,'dd-mon-yy'),to_number(:vOPEN),to_number(:vHIGH),to_number(:vLOW),to_number(:vCLOSE),to_number(:vVOLUME))"
-                cursor.execute(insert_stmt,vSYMBOL=values[0],vTRADEDATE=values[1],vOPEN=values[2],vHIGH=values[3],vLOW=values[4],vCLOSE=values[5],vVOLUME=values[6])
-                connection.commit()
-        except cx_Oracle.IntegrityError:
-                print values[0]+' '+values[1]+' row already present'
-def csv_read(file):
-        lis=[]
-        csv1 = file
-        with open(csv1) as csvfile:
-                reader = csv.reader(csvfile, delimiter=',')
-                for row in reader:
-                    print row
-                    insert_db(row)
-                csvfile.close()
-                time.sleep(5)
-                cursor.callproc('SPLIT_PROC',())
-                cursor.callproc('nasdaq_avg_proc_daily',())
-                cursor.callproc('RSI_proc',())
-                cursor.callproc('BOLLINGER_proc',())
-                cursor.callproc('nasdaq_postive_proc',())
-                cursor.callproc('nasdaq_VOL_proc',())
-                cursor.execute('insert into PE select * from P_E')
-                cursor.execute('insert into funda select * from fundav')
-                cursor.execute('insert into QUICK_LOOK_LOG select * from QUICK_LOOK')
-                cursor.execute('insert into nasdaq.Down150_vw select * from  DOWN_150_SELECT_VW')
-                cursor.execute('insert into rsi2530_log select * from rsi2030')
-                connection.commit()
-                print '******************* Executing 150 down Proc sleep **********'
-                #time.sleep(150)
-                print '******************* Executing 150 down Proc **********'
-                cursor.callproc('Analyze_150_proc',())
-                print '******************* observer Proc start **********'
-                cursor.callproc('observer_proc',())
-                print '******************* observer Proc end **********'
-                print '******************* But Proc start **********'
-                cursor.callproc('Buy_proc',())
-                print '******************* Buy Proc end **********'
-                connection.commit()
-                move_files(file)
-def move_files(file):
-       print file
-       flname=file.split("NASDAQ\\")[1]
-       print flname
-       shutil.move(file,"C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\"+flname)
-#       shutil.move(file,"C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\"+flname)
+            cursor.execute(stmt)
+        except oracledb.IntegrityError:
+            pass
+        except Exception as exc:
+            connection.rollback()
+            stop(f"View insert failed [{stmt[:50]}]: {exc}", tradedate)
+    connection.commit()
+
+    # ── Analysis procs ────────────────────────────────────────────────────
+    run_proc('Analyze_150_proc', tradedate)
+    run_proc('observer_proc',    tradedate)
+    run_proc('Buy_proc',         tradedate)
+
+    # ── Archive CSV ───────────────────────────────────────────────────────
+    flname = os.path.basename(filepath)
+    try:
+        shutil.move(filepath, f"C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\{flname}")
+        print(f"    Archived : {flname}")
+    except Exception as exc:
+        print(f"    Warning  : could not archive {flname} — {exc}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
 list_of_files = glob.glob("C:\\Users\\jenit\\Downloads\\NASDAQ\\NASDAQ*.csv")
-#latest_file = max(list_of_files, key=os.path.getctime)
-#print list_of_files
-print len(list_of_files)
-for i in range(0, len(list_of_files)):
-    print list_of_files[i]
-    print i
-    csv_read(list_of_files[i])
+print(f"Files found : {len(list_of_files)}")
+
+for filepath in list_of_files:
+    csv_read(filepath)

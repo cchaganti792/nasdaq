@@ -75,9 +75,35 @@ def stop(message, cleanup_sql=None):
 
 def cleanup_sql_for_date(tradedate):
     """Returns the SQL lines needed to wipe a date and start fresh."""
+    d = tradedate
     return [
-        f"DELETE FROM NASDAQ_HIST WHERE TRADEDATE = DATE '{tradedate}';",
-        f"DELETE FROM NASDAQ_AVG  WHERE TRADEDATE = DATE '{tradedate}';",
+        f"-- Core price tables",
+        f"DELETE FROM NASDAQ_HIST      WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM NASDAQ_AVG       WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM VOL_TOPPERS_HIST WHERE TRADEDATE   = DATE '{d}';",
+        f"-- Price / volume signal logs (nasdaq_avg_proc_daily)",
+        f"DELETE FROM PRI_LOG          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM PRI2_LOG         WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM VOL_LOG          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM VOL2_LOG         WHERE INSERT_DATE = DATE '{d}';",
+        f"-- Screener output tables (nasdaq_postive_proc / nasdaq_VOL_proc)",
+        f"DELETE FROM STRONG_POSITIVE  WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM ALL_POSITIVE     WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM STRONG_NEGITIVE  WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM ALL_NEGITIVE     WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM BULLISH          WHERE INS_DATE    = DATE '{d}';",
+        f"DELETE FROM POS_VOL          WHERE INSERT_DATE = DATE '{d}';",
+        f"DELETE FROM NEG_VOL          WHERE INSERT_DATE = DATE '{d}';",
+        f"-- Snapshot log tables (view inserts)",
+        f"DELETE FROM PE               WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM FUNDA            WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM QUICK_LOOK_LOG   WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM RSI2530_LOG      WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM DOWN150_VW       WHERE TRADEDATE   = DATE '{d}';",
+        f"-- Analysis proc tables (observer_proc / Buy_proc)",
+        f"DELETE FROM OBSERVER_LOG     WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM PRICE_POINTS_LOG WHERE TRADEDATE   = DATE '{d}';",
+        f"DELETE FROM BUY_LOG_LOG      WHERE TRADEDATE   = DATE '{d}';",
         "COMMIT;",
     ]
 
@@ -154,7 +180,7 @@ def load_csv_to_hist(filepath, tradedate):
     return inserted, skipped
 
 
-def run_proc(name, params=None):
+def run_proc(name, tradedate, params=None):
     """Call a stored procedure. Stops the script if it fails."""
     print(f"    {name:<28} running...")
     try:
@@ -167,7 +193,7 @@ def run_proc(name, params=None):
             [
                 "The proc above failed. Data may be in a partial state.",
                 "Check the error, then clean up this date and re-run:",
-            ] + cleanup_sql_for_date(params[0] if params else 'UNKNOWN')
+            ] + cleanup_sql_for_date(tradedate)
         )
 
 
@@ -214,19 +240,19 @@ for filepath in all_files:
         )
 
     # ── 2. Apply stock splits whose EX_DATE = tradedate ────────────────────
-    run_proc('SPLIT_PROC', [tradedate])
+    run_proc('SPLIT_PROC', tradedate, [tradedate])
 
     # ── 3. Compute moving averages for this specific date ──────────────────
     #    Explicit date is REQUIRED — NULL would use max(tradedate) only
-    run_proc('nasdaq_avg_proc_daily', [tradedate])
+    run_proc('nasdaq_avg_proc_daily', tradedate, [tradedate])
 
     # ── 4. RSI and Bollinger (no date param — use max = just-loaded date) ──
-    run_proc('RSI_proc')
-    run_proc('BOLLINGER_proc')
+    run_proc('RSI_proc', tradedate)
+    run_proc('BOLLINGER_proc', tradedate)
 
     # ── 5. Screeners ───────────────────────────────────────────────────────
-    run_proc('nasdaq_postive_proc')
-    run_proc('nasdaq_VOL_proc')
+    run_proc('nasdaq_postive_proc', tradedate)
+    run_proc('nasdaq_VOL_proc', tradedate)
 
     # ── 6. Populate summary / log tables from views ────────────────────────
     view_inserts = [
@@ -250,9 +276,9 @@ for filepath in all_files:
     connection.commit()
 
     # ── 7. Analysis procs ──────────────────────────────────────────────────
-    run_proc('Analyze_150_proc')
-    run_proc('observer_proc')
-    run_proc('Buy_proc')
+    run_proc('Analyze_150_proc', tradedate)
+    run_proc('observer_proc', tradedate)
+    run_proc('Buy_proc', tradedate)
 
     # ── 8. Move processed file to backup ───────────────────────────────────
     shutil.move(filepath, os.path.join(BACKUP_DIR, filename))

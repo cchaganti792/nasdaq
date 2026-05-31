@@ -1,54 +1,130 @@
-import sys
-import os
-import selenium
-import re
-import xlrd
-from selenium import webdriver
-import pandas
-import csv
-import xlsx2csv
+"""
+Nasdaq_stock_list.py  -  Python 3
+Downloads the full Nasdaq-listed stock list and refreshes NASDAQ_STOCK_LIST.
+
+Step 1 : Fetch all stocks from Nasdaq screener API (symbol, name, market cap,
+         sector, industry, IPO year, last sale, URL).
+Step 2 : Upsert into NASDAQ_STOCK_LIST — inserts new symbols, updates existing.
+Step 3 : Fetch OUTSTANDING_SHARES and FLOAT_SHARES from yfinance for every
+         symbol in the table (~15 min for 3 000+ symbols at 0.3 s per call).
+
+Run: python Nasdaq_stock_list.py
+"""
+
 import time
-import glob
-import shutil
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import NoSuchElementException
-os.environ['ORACLE_HOME'] ="C:\\app\User\product\\11.2.0\client_1"
-import cx_Oracle
-import os
-connection = cx_Oracle.connect("nasdaq", "nasdaq123", "localhost/orcl")
+import requests
+import yfinance as yf
+import oracledb
+
+# ── Oracle connection ──────────────────────────────────────────────────────
+ORACLE_CLIENT_DIR = r"C:\ora_insta_client\instantclient_23_0"
+oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)
+connection = oracledb.connect(user="nasdaq", password="nasdaq123", dsn="localhost/orcl")
 cursor = connection.cursor()
-def insert_db(values):
-        try:
-                insert_stmt="insert into nasdaq_stock_list (SYMBOL,NAME,LASTSALE,MARKETCAP,IPOYEAR,SECTOR,INDUSTRY,URL) values (:vSYMBOL,:vNAME,:vLASTSALE,:vMARKETCAP,:vIPOYEAR,:vSECTOR,:vINDUSTRY,:vURL)"
-                cursor.execute(insert_stmt,vSYMBOL=values[0],vNAME=values[1],vLASTSALE=values[2],vMARKETCAP=values[3],vIPOYEAR=values[4],vSECTOR=values[5],vINDUSTRY=values[6],vURL=values[7])
-                connection.commit()
-        except cx_Oracle.IntegrityError:
-                print values[0]+' '+values[1]+' row already present'
-def csv_read(file):
-        lis=[]
-        csv1 = file
-        with open(csv1) as csvfile:
-                reader = csv.reader(csvfile, delimiter=',')
-                for row in reader:
-                    print row[0]
-                    if row[0]!='Symbol':
-                            insert_db(row)
-                csvfile.close()
-#                time.sleep(3)
-### clear download directory ###
-#for file in (glob.glob("C:\Users\User\Downloads\\companylist*.csv")):
-#        flname=file.split("ds\\")[1]
-#        shutil.move(file,"C:\\Users\\User\\Downloads\\stock_funda_temp\\"+flname)
-#symbol_input_lis=[]
-##cursor.execute('select NSECODE from NSESTOCK where NSECODE NOT IN (SELECT NSECODE FROM NSESTOCK_INDX union SELECT NSECODE FROM funda_download_status where status=1) and rownum<50 order by nsecode')
-##cursor.execute('select distinct symbol as nsecode from nsehist_nf where tradedate=:vDATE and symbol NOT IN (SELECT NSECODE FROM NSESTOCK_INDX union SELECT NSECODE FROM funda_download_status where status in (1)) and rownum<350 order by nsecode',vDATE='24-NOV-17')
-##cursor.execute('select NSECODE from NSESTOCK where NSECODE=:code',code='ANDHRABANK')
-list_of_files = glob.glob("C:\Users\User\Downloads\\companylist*.csv")
-#latest_file = max(list_of_files, key=os.path.getctime)
-#print list_of_files
-print len(list_of_files)
-for i in range(0, len(list_of_files)):
-    print list_of_files[i]
-    print i
-    csv_read(list_of_files[i])
+
+# ── Nasdaq screener API ────────────────────────────────────────────────────
+SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
+HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+# ── Step 1: Download stock list ────────────────────────────────────────────
+print("=" * 65)
+print("  Nasdaq_stock_list.py")
+print("  Step 1 : Downloading stock list from Nasdaq screener API...")
+print("=" * 65)
+
+resp = requests.get(
+    SCREENER_URL,
+    headers=HEADERS,
+    params={"tableonly": "true", "limit": 10000, "download": "true"},
+    timeout=30
+)
+resp.raise_for_status()
+rows = resp.json()["data"]["rows"]
+print(f"  Stocks received from API : {len(rows)}")
+
+# ── Step 2: Upsert into NASDAQ_STOCK_LIST ─────────────────────────────────
+print("\n  Step 2 : Upserting into NASDAQ_STOCK_LIST...")
+
+MERGE_SQL = """
+MERGE INTO nasdaq_stock_list dst
+USING (SELECT :sym AS symbol FROM dual) src
+ON (dst.symbol = src.symbol)
+WHEN MATCHED THEN
+    UPDATE SET name      = :name,
+               lastsale  = :lastsale,
+               marketcap = :marketcap,
+               ipoyear   = :ipoyear,
+               sector    = :sector,
+               industry  = :industry,
+               url       = :url
+WHEN NOT MATCHED THEN
+    INSERT (symbol, name, lastsale, marketcap, ipoyear, sector, industry, url)
+    VALUES (:sym,  :name, :lastsale, :marketcap, :ipoyear, :sector, :industry, :url)
+"""
+
+upserted = 0
+for row in rows:
+    cursor.execute(MERGE_SQL,
+        sym       = row.get('symbol',    '').strip(),
+        name      = row.get('name',      '')[:150],
+        lastsale  = row.get('lastsale',  '')[:10],
+        marketcap = row.get('marketCap', '')[:10],
+        ipoyear   = row.get('ipoyear',   '')[:10],
+        sector    = row.get('sector',    '')[:30],
+        industry  = row.get('industry',  '')[:100],
+        url       = row.get('url',       '')[:200],
+    )
+    upserted += 1
+
+connection.commit()
+print(f"  Rows upserted : {upserted}")
+
+# ── Step 3: Fetch outstanding and float shares from yfinance ───────────────
+print("\n  Step 3 : Fetching outstanding / float shares from yfinance...")
+print("  (approx 15 min for 3 000+ symbols)\n")
+
+cursor.execute("SELECT symbol FROM nasdaq_stock_list ORDER BY symbol")
+symbols = [r[0] for r in cursor.fetchall()]
+total   = len(symbols)
+
+shares_updated = 0
+errors         = 0
+
+for idx, symbol in enumerate(symbols, 1):
+    try:
+        info    = yf.Ticker(symbol).info
+        o_shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+        f_shares = info.get('floatShares')
+
+        if o_shares or f_shares:
+            cursor.execute(
+                """UPDATE nasdaq_stock_list
+                   SET outstanding_shares = :os,
+                       float_shares       = :fs
+                   WHERE symbol = :sym""",
+                os=int(o_shares) if o_shares else None,
+                fs=int(f_shares) if f_shares else None,
+                sym=symbol
+            )
+            shares_updated += 1
+
+        if idx % 100 == 0:
+            connection.commit()
+            print(f"  [{idx:>5}/{total}]  shares updated: {shares_updated}  errors: {errors}")
+
+        time.sleep(0.3)
+
+    except Exception as exc:
+        errors += 1
+
+connection.commit()
+
+print(f"\n{'='*65}")
+print(f"  Done.")
+print(f"  Stocks upserted          : {upserted}")
+print(f"  Shares rows updated      : {shares_updated}")
+print(f"  Errors (symbol skipped)  : {errors}")
+print(f"{'='*65}")

@@ -1,46 +1,64 @@
+"""
+Nasdaq_load.py  -  Daily load entry point
+
+Run once per trading day after downloading the NASDAQ*.csv from eoddata.
+
+Execution order:
+  1. Nasdaq_stock_list.py       -- refresh symbol list, insert new symbols
+  2. SPLIT_INFO_DOWNLOAD_YFINANCE.py -- pull last-7-days split data from yfinance
+  3. For each NASDAQ*.csv in Downloads:
+       move CSV -> Downloads\NASDAQ\
+       NASDAQ_UPLOAD.py         -- insert OHLCV, run all DB procs, Buy_proc
+  4. NASDAQ_Analytics.py        -- signal quality analytics across all symbols
+"""
+
 import os
-import time
 import glob
 import shutil
-import cx_Oracle
-connection = cx_Oracle.connect("nasdaq", "nasdaq123", "localhost/orcl")
-cursor = connection.cursor()
-list_of_files = glob.glob("C:\\Users\\jenit\\Downloads\\NASDAQ*.csv")
-for i in list_of_files:
-    flname=i.split("ds\\")[1]
-    shutil.move(i,"C:\\Users\\jenit\\Downloads\\NASDAQ\\"+flname)
-    new_location_file="C:\\Users\\jenit\\Downloads\\NASDAQ\\"+flname
-    print (flname)
-    cursor.callproc('stock_split_status',())
-    cursor.execute("select count(*) from  SPLIT_STOCK_DOWNLOAD_STATUS where DSTATE='N'")
-    for row in cursor:
-        ##symbol_input_lis.append(row[0])
-        print (row[0])
-        if row[0]>=1 :
-            print ('entered split download part')
-            cmd = 'date'
-            #os.system(cmd)
-            os.system('python SPLIT_INFO_DOWNLOAD_YFINANCE.py')
-        else :
-            print (' I guess split information is already downloaded ')
-    ##print symbol_input_lis
-    print ('***************---- NASDAQ UPLOAD --- *******')
-    os.system('C:\\Python27\\python NASDAQ_UPLOAD.py')
-    print ('***************---- NASDAQ Analytics --- *******')
-    os.system('C:\\Python27\\python NASDAQ_Analytics.py')
-    print ('***************---- NASDAQ Bullish --- *******')
-    ##solving removeing things not reffered for long ## os.system('python Nasdaq_Bullish.py')
-    try:
-        shutil.move(new_location_file,"C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\"+flname)
-        print (new_location_file)
-    except IOError:
-        print ('error in moving file ')
 
-#print list_of_files[0]
-#flname=latest_file.split("ds\\")[1]
-#shutil.move(latest_file,"C:\\Users\\User\\Downloads\\stock_funda_temp\\"+flname)
-#latest_file = min(list_of_files, key=os.path.getctime)
-#print latest_file
-##os.system('python NASDAQ_UPLOAD.py')
-##os.system('python NASDAQ_Analytics.py')
-##os.system('python Nasdaq_Bullish.py')
+SEP = '=' * 60
+
+# ── Step 1: Refresh Nasdaq symbol list ────────────────────────────────────
+print(SEP)
+print('  Step 1 : Nasdaq symbol list update')
+print(SEP)
+os.system('python Nasdaq_stock_list.py')
+
+# ── Step 2: Update stock split data ───────────────────────────────────────
+print(SEP)
+print('  Step 2 : Stock split data update')
+print(SEP)
+os.system('python SPLIT_INFO_DOWNLOAD_YFINANCE.py')
+
+# ── Step 3: Upload daily price CSV(s) ─────────────────────────────────────
+print(SEP)
+print('  Step 3 : Daily price data upload')
+print(SEP)
+
+list_of_files = glob.glob("C:\\Users\\jenit\\Downloads\\NASDAQ*.csv")
+
+if not list_of_files:
+    print('  No NASDAQ*.csv files found in Downloads folder. Skipping upload.')
+else:
+    print(f'  Found {len(list_of_files)} file(s) to process.')
+    for csv_path in list_of_files:
+        flname = csv_path.split("ds\\")[1]
+        dest   = "C:\\Users\\jenit\\Downloads\\NASDAQ\\" + flname
+        shutil.move(csv_path, dest)
+        print(f'  Processing : {flname}')
+        os.system('python NASDAQ_UPLOAD.py')
+        try:
+            shutil.move(dest, "C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\" + flname)
+            print(f'  Archived   : {flname}')
+        except IOError:
+            print(f'  Warning    : could not archive {flname}')
+
+# ── Step 4: Analytics ─────────────────────────────────────────────────────
+print(SEP)
+print('  Step 4 : NASDAQ Analytics')
+print(SEP)
+os.system('python NASDAQ_Analytics.py')
+
+print(SEP)
+print('  Daily load complete.')
+print(SEP)
