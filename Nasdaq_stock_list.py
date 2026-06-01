@@ -122,6 +122,10 @@ for idx, symbol in enumerate(symbols, 1):
 
 connection.commit()
 
+# ── Stamp last refreshed date on all rows ──────────────────────────────────
+cursor.execute("UPDATE nasdaq_stock_list SET last_refreshed = SYSDATE")
+connection.commit()
+
 print(f"\n{'='*65}")
 print(f"  Done.")
 print(f"  Stocks upserted          : {upserted}")

@@ -2,7 +2,7 @@
 NASDAQ_UPLOAD.py  -  Python 3
 Daily price data loader — called by Nasdaq_load.py.
 
-Reads each NASDAQ*.csv from Downloads\NASDAQ\, inserts into NASDAQ_HIST,
+Reads each NASDAQ*.csv from Downloads/NASDAQ/, inserts into NASDAQ_HIST,
 then runs the full proc chain. If any proc fails, prints cleanup SQL for
 that trade date and exits so no partial data is left silently in the DB.
 """
@@ -80,7 +80,7 @@ def run_proc(name, tradedate, params=None):
         stop(f"Proc {name} failed: {exc}", tradedate)
 
 
-def insert_db(values, tradedate):
+def insert_db(values):
     try:
         cursor.execute(
             "INSERT INTO NASDAQ_HIST (SYMBOL,TRADEDATE,OPEN,HIGH,LOW,CLOSE,VOLUME) "
@@ -89,12 +89,17 @@ def insert_db(values, tradedate):
             sym=values[0], dt=values[1], op=values[2],
             hi=values[3],  lo=values[4], cl=values[5], vol=values[6]
         )
+        return True
     except oracledb.IntegrityError:
-        print(f"    {values[0]} {values[1]} already present — skipped")
+        return False
+    except Exception as exc:
+        print(f"    INSERT ERROR : {values[0]} {values[1]} — {exc}")
+        return False
 
 
 def csv_read(filepath):
-    print(f"\n  Loading : {os.path.basename(filepath)}")
+    flname = os.path.basename(filepath)
+    print(f"\n  [LOAD]  {flname}")
 
     # ── Insert OHLCV rows ──────────────────────────────────────────────────
     inserted = 0
@@ -105,17 +110,20 @@ def csv_read(filepath):
         for row in csv.reader(f):
             if len(row) < 7:
                 continue
-            insert_db(row, None)
-            inserted += 1
+            if insert_db(row):
+                inserted += 1
+            else:
+                skipped += 1
     connection.commit()
 
     # ── Determine tradedate from what was just loaded ──────────────────────
     cursor.execute("SELECT MAX(TRADEDATE) FROM NASDAQ_HIST")
     result = cursor.fetchone()
     if not result or not result[0]:
-        stop(f"Could not determine tradedate after loading {os.path.basename(filepath)}")
+        stop(f"Could not determine tradedate after loading {flname}")
     tradedate = result[0].strftime('%Y-%m-%d')
-    print(f"    NASDAQ_HIST : {inserted} rows loaded  |  tradedate : {tradedate}")
+    skip_str  = f", {skipped} skipped" if skipped else ""
+    print(f"    {'NASDAQ_HIST':<28}: {inserted} rows inserted{skip_str}  |  date: {tradedate}")
 
     # ── Proc chain ────────────────────────────────────────────────────────
     run_proc('SPLIT_PROC',            tradedate)
@@ -149,17 +157,18 @@ def csv_read(filepath):
     run_proc('Buy_proc',         tradedate)
 
     # ── Archive CSV ───────────────────────────────────────────────────────
-    flname = os.path.basename(filepath)
     try:
-        shutil.move(filepath, f"C:\\Users\\jenit\\Downloads\\NASDAQ\\Nasdaq_bkp\\{flname}")
-        print(f"    Archived : {flname}")
+        shutil.move(filepath, f"D:\\Nasdaq_loaded\\{flname}")
+        print(f"    Moved to D:\\Nasdaq_loaded\\  Day complete.")
     except Exception as exc:
         print(f"    Warning  : could not archive {flname} — {exc}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
 list_of_files = glob.glob("C:\\Users\\jenit\\Downloads\\NASDAQ\\NASDAQ*.csv")
-print(f"Files found : {len(list_of_files)}")
 
-for filepath in list_of_files:
-    csv_read(filepath)
+if not list_of_files:
+    print("  No NASDAQ*.csv files found in Downloads/NASDAQ/")
+else:
+    for filepath in list_of_files:
+        csv_read(filepath)
