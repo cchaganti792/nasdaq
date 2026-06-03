@@ -70,6 +70,10 @@ else:
 print('  [Step 4]  analytics : running...')
 os.system('python NASDAQ_Analytics.py')
 
+# ── Step 5: Sector / industry trend snapshot ──────────────────────────────
+print('  [Step 5]  sectors   : running...')
+os.system('python SECTOR_TREND_DAILY.py')
+
 print(SEP)
 print('  Daily load complete.')
 print(SEP)
