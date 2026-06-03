@@ -15,6 +15,18 @@ import shutil
 import time
 import oracledb
 
+# ── Toggle: set True to use Python proc, False to call Oracle proc ─────────
+# Revert to Oracle: flip the relevant flag to False (no other changes needed)
+USE_PYTHON_NASDAQ_AVG = True
+USE_PYTHON_RSI        = True
+USE_PYTHON_BOLLINGER  = True
+if USE_PYTHON_NASDAQ_AVG:
+    from procs.nasdaq_avg_proc_daily import nasdaq_avg_proc_daily
+if USE_PYTHON_RSI:
+    from procs.rsi_proc import rsi_proc
+if USE_PYTHON_BOLLINGER:
+    from procs.bollinger_proc import bollinger_proc
+
 # ── Oracle thick mode — required for Oracle 11g ────────────────────────────
 ORACLE_CLIENT_DIR = r"C:\ora_insta_client\instantclient_23_0"
 oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)
@@ -127,9 +139,33 @@ def csv_read(filepath):
 
     # ── Proc chain ────────────────────────────────────────────────────────
     run_proc('SPLIT_PROC',            tradedate)
-    run_proc('nasdaq_avg_proc_daily', tradedate)
-    run_proc('RSI_proc',              tradedate)
-    run_proc('BOLLINGER_proc',        tradedate)
+    if USE_PYTHON_NASDAQ_AVG:
+        print(f"    {'nasdaq_avg_proc_daily':<28} running (Python)...")
+        try:
+            nasdaq_avg_proc_daily(connection, cursor, tradedate)
+        except Exception as exc:
+            connection.rollback()
+            stop(f"nasdaq_avg_proc_daily (Python) failed: {exc}", tradedate)
+    else:
+        run_proc('nasdaq_avg_proc_daily', tradedate)
+    if USE_PYTHON_RSI:
+        print(f"    {'RSI_proc':<28} running (Python)...")
+        try:
+            rsi_proc(connection, cursor, tradedate)
+        except Exception as exc:
+            connection.rollback()
+            stop(f"RSI_proc (Python) failed: {exc}", tradedate)
+    else:
+        run_proc('RSI_proc',          tradedate)
+    if USE_PYTHON_BOLLINGER:
+        print(f"    {'BOLLINGER_proc':<28} running (Python)...")
+        try:
+            bollinger_proc(connection, cursor, tradedate)
+        except Exception as exc:
+            connection.rollback()
+            stop(f"BOLLINGER_proc (Python) failed: {exc}", tradedate)
+    else:
+        run_proc('BOLLINGER_proc',    tradedate)
     run_proc('nasdaq_postive_proc',   tradedate)
     run_proc('nasdaq_VOL_proc',       tradedate)
 

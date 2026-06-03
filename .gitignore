@@ -1,2 +1,6 @@
 # Exclude a specific file
 geckodriver.log
+
+# Python
+__pycache__/
+*.pyc
